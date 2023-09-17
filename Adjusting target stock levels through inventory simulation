@@ -1,0 +1,571 @@
+import sys
+import math
+import numpy as np
+import pandas as pd
+from PyQt5 import QtGui
+import scipy.stats as stats
+from collections import deque
+from collections import Counter
+import matplotlib.pyplot as plt
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QFormLayout, QLabel, QRadioButton, QSlider, 
+                             QSpinBox, QDoubleSpinBox, QPushButton, QFileDialog, QButtonGroup, QTableWidget, 
+                             QTableWidgetItem, QMainWindow, QSizePolicy, QTabWidget, QFileDialog)
+
+def simulate_inventory_planning(supplier, constraint, mov, approach, lead_time, desired_service_level, desired_confidence, review_period, num_days, days_to_order, next_review, df_suppliers, data, data_demand):
+  supplier = supplier.checkedButton().text()
+  constraint = constraint.checkedButton().text()
+  mov = mov.value()
+  approach = approach.checkedButton().text()
+  lead_time = lead_time.value()
+  desired_service_level = desired_service_level.value()/10
+  desired_confidence = desired_confidence.value()/10
+  review_period = review_period.value()
+  num_days = num_days.value()
+  days_to_order = days_to_order.value()
+  next_review = next_review.value()  
+  if lead_time > 90:
+        mri = 30
+  else:
+        mri = 7
+        
+  if supplier == '400228':
+    supplier_data = df_suppliers[df_suppliers['Supplier'] == 400228]
+    item_numbers = supplier_data['Item'].tolist()
+  elif supplier == '400428':
+    supplier_data = df_suppliers[df_suppliers['Supplier'] == 400428]
+    item_numbers = supplier_data['Item'].tolist()
+  elif supplier == '401020':
+    supplier_data = df_suppliers[df_suppliers['Supplier'] == 401020]
+    item_numbers = supplier_data['Item'].tolist()
+  elif supplier == '401136':
+    supplier_data = df_suppliers[df_suppliers['Supplier'] == 401136]
+    item_numbers = supplier_data['Item'].tolist()
+
+  df = data[data['Item'].isin(item_numbers)]
+  global safety_stock_days
+  safety_stock_days = dict(zip(df['Item'], df['Safety Stock Days']))
+  moq = dict(zip(df['Item'], df['MOQ'])) 
+  lot_size = dict(zip(df['Item'], df['INCRESLOT']))
+  orders_onway = dict(zip(df['Item'], df['OrdersOnWay']))
+  volume = dict(zip(df['Item'], df['Volume']))
+  weight = dict(zip(df['Item'], df['Weight']))
+  unit_cost = dict(zip(df['Item'], df['Unit Cost']))
+  inventory_onhand = dict(zip(df['Item'], df['Inventory Onhand']))
+  inventory_level = dict(zip(df['Item'], df['Inventory Level']))
+    
+  for item, stock in safety_stock_days.items():
+    print(f"Item: {item} | Initial safety stock: {stock}")
+  print()
+
+  max_container_weight = 15000  # Maximum weight of a container (in kg)
+  max_container_volume = 25  # Maximum volume of a container (in cubic meters)
+  min_container_volume = 21  # Minimum volume of a container to be filled (in cubic meters)
+    
+  # Start simulation................................................................................................................................................................................................
+  num_sim = 350 #SELECT
+  mode_count = 0
+  global mean
+  mean = 0
+  demand = {}
+  sim_iteration = 0
+  while mean != desired_service_level:
+    service_levels = []
+    sim_iteration += 1
+    print(f"Simulation: {sim_iteration}")
+    
+    for simulation_num in range(1, num_sim + 1):
+        
+      for item in item_numbers:
+          demand_values = data_demand[data_demand['Item'] == item]['Demand'].tolist()
+          bin_width = (max(demand_values) - 1) // 10  
+          bins = [0] + [1 + i * bin_width for i in range(10)] + [max(demand_values)]
+          hist, bin_edges = np.histogram(demand_values, bins=bins)
+          bin_probabilities = hist / len(demand_values)
+          cumulative_probabilities = np.cumsum(bin_probabilities)
+          simulated_values = []
+
+          for _ in range(num_days + lead_time + math.ceil(max(safety_stock_days.values()))): #ASSUMING LEAD TIME IS LONGER THAN SAFETY STOCK DAYS
+            rand_value = np.random.rand()
+            selected_bin = np.digitize(rand_value, cumulative_probabilities)
+
+            if selected_bin == 0:
+                demand_val = 0
+            else:
+                min_value = bin_edges[selected_bin]
+                max_value = bin_edges[selected_bin + 1]
+                demand_val = np.random.uniform(min_value, max_value)
+
+            simulated_values.append(demand_val)
+
+
+          demand[item] = simulated_values
+  # Order generation..........................................................................................................................................................................................          
+      unsorted_orders = []
+      item_pending = deque()
+      first_arriving_order = []
+      for item, value in orders_onway.items():
+        first_arriving_order.append((days_to_order + 1, item, value)) 
+      day_of_review = next_review + 1
+      if day_of_review == review_period:
+        day_of_review = 0
+        
+      for item in item_numbers: 
+        day_of_order = days_to_order - lead_time
+        for day in range(1, num_days + 1):
+            if inventory_onhand[item] >= demand[item][day - 1]:
+                inventory_onhand[item] -= demand[item][day - 1]
+                inventory_level[item] -= demand[item][day - 1]
+
+            if day % review_period == day_of_review or day == next_review + 1:
+              inventory_ROP = (inventory_level[item] + demand[item][day - 1]) - (
+                      sum(demand[item][day-1:(day + math.floor(safety_stock_days[item])-2)]) +
+                      (safety_stock_days[item] % 1)*(demand[item][day + math.floor(safety_stock_days[item]) - 1]) +
+                      sum(demand[item][day-1:(day + math.floor(lead_time)-2)]) +
+                      (lead_time % 1)*(demand[item][day + math.floor(lead_time) - 1])
+                      )
+              if inventory_ROP <= 0 and day >= day_of_order + mri:
+                day_of_order = day
+                if moq[item] >= sum(demand[item][day-1:day + mri - 2]):
+                    value = moq[item]
+                else:
+                    value = ((sum(demand[item][day-1:day + mri - 2]) - moq[item] + lot_size[item] - 1) // lot_size[item]) * lot_size[item] + moq[item]    
+
+                inventory_level[item] += value
+                item_pending.append((day + lead_time, value))
+                unsorted_orders.append((day, item, value))
+
+            if first_arriving_order[0][0] == day:
+                for _, item_num, value in first_arriving_order:
+                    if item_num == item :
+                        inventory_onhand[item] += value
+                        break
+
+            while item_pending and item_pending[0][0] == day:
+              _, value = item_pending.popleft()
+              inventory_onhand[item] += value
+
+      orders = sorted(unsorted_orders, key=lambda x: x[0])
+  # Define simulation parameters...................................................................................................................................................................................................................................................
+      inventory_onhand = dict(zip(df['Item'], df['Inventory Onhand']))
+      inventory_level = dict(zip(df['Item'], df['Inventory Level']))
+      sensitivity = []
+      inventory_pending = deque()
+      total_orders = 0
+      sufficient_orders = 0
+      day_of_order = days_to_order - lead_time
+
+      for day in range(1, num_days + 1):
+        container_weight = 0
+        container_volume = 0
+        order_value = 0
+
+    #CUSTOMER ORDER....................................................................................................................................................................................................................................................................
+        for item, quantity in demand.items():
+            if quantity[day - 1] != 0:
+              total_orders += 1
+              if inventory_onhand[item] >= quantity[day - 1]:
+                inventory_onhand[item] -= quantity[day - 1]
+                inventory_level[item] -= quantity[day - 1]
+                sufficient_orders += 1
+
+    #SUPPLIER ORDER...........................................................................................................................................
+        if day % review_period == day_of_review or day == next_review + 1:
+            ranking = {
+                item: (inventory_level[item] + demand[item][day - 1]) - (
+                    sum(demand[item][day-1:(day + math.floor(safety_stock_days[item])-2)]) +
+                    (safety_stock_days[item] % 1)*(demand[item][day + math.floor(safety_stock_days[item]) - 1]) +
+                    sum(demand[item][day-1:(day + math.floor(lead_time)-2)]) +
+                    (lead_time % 1)*(demand[item][day + math.floor(lead_time) - 1])
+                )
+                for item in item_numbers
+            }
+
+            sorted_items = sorted(ranking.items(), key=lambda x: x[1])
+
+            if sorted_items[0][1] <= 0 and day >= day_of_order + mri:
+              sensitivity.append(sorted_items[0][0])
+              day_of_order = day
+
+              if constraint == 'Container Loading':
+                i = 0    
+                while i < len(orders):
+                  _, item, value = orders[i]  
+                  if container_volume < max_container_volume and container_weight < max_container_weight:
+                    counter = 0
+                    inventory_level[item] += value
+                    inventory_pending.append((day + lead_time, item, value))
+                    container_weight += weight[item]*value
+                    container_volume += volume[item]*value
+
+                    if container_volume > max_container_volume or container_weight > max_container_weight:
+                      counter = 1
+                      inventory_level [item] -=  value
+                      container_weight -= weight[item]*value
+                      container_volume -= volume[item]*value
+                      inventory_pending.pop()
+
+                    if counter == 0:
+                      orders.pop(i)
+                    else:
+                        i += 1
+
+              else:
+                for _, item, value in orders:
+                  if order_value < mov:
+                    inventory_level[item] += value
+                    inventory_pending.append((day + lead_time, item, value))
+                    order_value += unit_cost[item]*value
+                    orders = orders.drop(index)
+
+        if first_arriving_order[0][0] == day:
+            for _, item, value in first_arriving_order:
+                inventory_onhand[item] += value          
+
+        while inventory_pending and inventory_pending[0][0] == day:
+          _, item, value = inventory_pending.popleft()
+          inventory_onhand[item] += value
+
+  #...............................................................................................................................................................................................................................................................................................
+      service_level = (sufficient_orders / total_orders)*100
+      service_levels.append(service_level)
+ 
+    mean = round(np.mean(service_levels), 1)
+    stddev = np.std(service_levels, ddof=1)
+    n = len(service_levels)
+    half_width = stats.norm.ppf((1 + desired_confidence/100) / 2) * (stddev / np.sqrt(n))
+    print("Mean:", mean)
+    print("Standard Deviation:", round(stddev,1))
+    print("Confidence Interval:", (mean - half_width, mean + half_width))
+    print("Half-Width:", half_width)
+    
+    
+    if mean != desired_service_level:
+      if approach == 'Unit Cost':
+        if mean > desired_service_level:
+          max_item = max(unit_cost, key=unit_cost.get)
+          safety_stock_days[max_item] -= 1
+        else:
+          min_item = min(unit_cost, key=unit_cost.get)
+          safety_stock_days[min_item] += 1
+
+      elif approach == 'Value':
+        if mean > desired_service_level:
+          max_item = max(safety_stock_days, key=safety_stock_days.get)
+          safety_stock_days[max_item] -= 1
+        else:
+          min_item = min(safety_stock_days, key=safety_stock_days.get)
+          safety_stock_days[min_item] += 1
+
+      elif approach == 'Sensitivity':
+        item_counts = Counter(sensitivity)
+        if mean > desired_service_level:
+          most_frequent_item = item_counts.most_common(1)[0][0]
+          safety_stock_days[most_frequent_item] -= 1
+        else:
+          least_frequent_item = item_counts.most_common()[-1][0]
+          safety_stock_days[least_frequent_item] += 1
+
+      elif approach == 'Sensitivity/Unit Cost':
+        item_counts = Counter(sensitivity)
+        sensitivity_to_unit_cost_ratio = {
+        item_numbers: item_counts[item] / unit_cost[item]
+        for item in item_counts.keys() & unit_cost.keys()
+        }
+        if mean > desired_service_level:
+          max_sensitivity_item = max(sensitivity_to_unit_cost_ratio, key=sensitivity_to_unit_cost_ratio.get)
+          safety_stock_days[max_sensitivity_item] -= 1
+        else:
+          min_sensitivity_item = min(sensitivity_to_unit_cost_ratio, key=sensitivity_to_unit_cost_ratio.get)
+          safety_stock_days[min_sensitivity_item] += 1
+            
+      print(f"Service level for iteration {sim_iteration}: {mean}")  
+      for item, stock in safety_stock_days.items():
+          print(f"Item: {item} | New safety stock: {stock}")
+      
+      print()
+    
+  print(f"Final service level: {mean}") 
+  print(f"Final confidence level: {desired_confidence}")
+  print("Confidence Interval:", (mean - half_width, mean + half_width))
+  print("Half-Width:", half_width)
+    
+  for item, stock in safety_stock_days.items():
+    print(f"Item: {item} | Final safety stock: {stock}")
+  return mean, half_width, safety_stock_days
+
+def simulate_initial_info(supplier, df_suppliers, data):
+  supplier = supplier.text()
+
+  # Select suppliers
+  if supplier == '400228':
+    supplier_data = df_suppliers[df_suppliers['Supplier'] == 400228]
+    item_numbers = supplier_data['Item'].tolist()
+  elif supplier == '400428':
+    supplier_data = df_suppliers[df_suppliers['Supplier'] == 400428]
+    item_numbers = supplier_data['Item'].tolist()
+  elif supplier == '401020':
+    supplier_data = df_suppliers[df_suppliers['Supplier'] == 401020]
+    item_numbers = supplier_data['Item'].tolist()
+  elif supplier == '401136':
+    supplier_data = df_suppliers[df_suppliers['Supplier'] == 401136]
+    item_numbers = supplier_data['Item'].tolist()
+
+  #data = pd.read_excel(file_name, sheet_name='General info')
+  df = data[data['Item'].isin(item_numbers)]
+  global safety_stock_days
+  safety_stock_days = dict(zip(df['Item'], df['Safety Stock Days']))
+  moq = dict(zip(df['Item'], df['MOQ']))
+  lot_size = dict(zip(df['Item'], df['INCRESLOT']))
+  orders_onway = dict(zip(df['Item'], df['OrdersOnWay']))
+  volume = dict(zip(df['Item'], df['Volume']))
+  weight = dict(zip(df['Item'], df['Weight']))
+  unit_cost = dict(zip(df['Item'], df['Unit Cost']))
+  inventory_onhand = dict(zip(df['Item'], df['Inventory Onhand']))
+  inventory_level = dict(zip(df['Item'], df['Inventory Level']))
+    
+  return {
+          item: {
+              'Safety Stock Days': safety_stock_days[item],
+              'Inventory Onhand': inventory_onhand[item],
+              'Inventory Level': inventory_level[item],
+              'Orders in transit': orders_onway[item],
+              'MOQ': moq[item],
+              'Lot Size': lot_size[item],
+              'Unit Cost': unit_cost[item],
+              'Volume': volume[item],
+              'Weight': weight[item]
+          } for item in item_numbers
+      }
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("Inventory Planning Simulator")
+        self.setGeometry(100, 100, 800, 600)
+        
+        tab_widget = QTabWidget()
+        self.setCentralWidget(tab_widget)
+
+        page1 = QWidget()
+        page2 = QWidget()
+        tab_widget.addTab(page1, "User input")
+        tab_widget.addTab(page2, "Inventory information")
+        
+        layout1 = QVBoxLayout(page1)
+        layout2 = QVBoxLayout(page2)
+        
+        self.df_suppliers = None
+        self.data = None
+        self.data_demand = None
+          
+        upload_button = QPushButton("Upload Excel File")
+        upload_button.clicked.connect(self.upload_excel_file)
+        
+        supplier_widget = QFormLayout()
+        supplier_label = QLabel("Supplier:")
+        supplier_widget.addRow(supplier_label)
+
+        supplier_options = [("400228", 1), ("400428", 2), ("401020", 3), ("401136", 4)]
+        self.supplier_group = QButtonGroup()
+        for option_text, option_value in supplier_options:
+            radio_button = QRadioButton(option_text)
+            supplier_widget.addWidget(radio_button)
+            self.supplier_group.addButton(radio_button)
+        supplier_widget.setSpacing(5)
+        self.supplier_group.buttonClicked.connect(self.update_table)
+        self.update_table()
+
+        constraint_widget = QFormLayout()
+        constraint_label = QLabel("Constraint:")
+        constraint_widget.addRow(constraint_label)
+
+        constraint_options = [("Container Loading", 1), ("Minimum Order Value", 2)]
+        self.constraint_group = QButtonGroup()
+        for option_text, option_value in constraint_options:
+            radio_button = QRadioButton(option_text)
+            constraint_widget.addWidget(radio_button)
+            self.constraint_group.addButton(radio_button)
+        constraint_widget.setSpacing(5)
+
+        self.mov_widget = QDoubleSpinBox()
+        self.mov_widget.setDecimals(1)
+        self.mov_widget.setRange(500, 100000.0)
+        self.mov_widget.setValue(1000.0)
+        self.mov_widget.setSingleStep(10.0)
+        self.mov_widget.setEnabled(False)
+
+        constraint_widget.itemAt(2).widget().toggled.connect(lambda state: self.mov_widget.setEnabled(state))
+
+        approach_widget = QFormLayout()
+        approach_label = QLabel("Safety Stock Adjustment:")
+        approach_widget.addRow(approach_label)
+
+        approach_options = [("Unit Cost", 1), ("Value", 2), ("Sensitivity", 3), ("Sensitivity/Unit Cost", 4)]
+        self.approach_group = QButtonGroup()
+        for option_text, option_value in approach_options:
+            radio_button = QRadioButton(option_text)
+            approach_widget.addWidget(radio_button)
+            self.approach_group.addButton(radio_button)
+        approach_widget.setSpacing(5)
+
+        lead_time_label = QLabel("Lead time:")
+        self.lead_time_widget = QSpinBox()
+        self.lead_time_widget.setRange(1, 100)
+        self.lead_time_widget.setValue(14)
+        
+        desired_service_level_label = QLabel("Desired Service Level (%):")
+        self.desired_service_level_widget = QSlider()
+        self.desired_service_level_widget.setRange(950, 980)  
+        self.desired_service_level_widget.setValue(975)  
+        self.desired_service_level_widget.setOrientation(1) 
+
+        def update_service_level_label(value):
+            scaled_value = value / 10
+            desired_service_level_label.setText(f"Desired Service Level ({scaled_value}%):")
+            
+        self.desired_service_level_widget.valueChanged.connect(update_service_level_label)
+        update_service_level_label(self.desired_service_level_widget.value())
+  #...........................................................................................
+        desired_confidence_label = QLabel("Desired confidence level (%):")
+        self.desired_confidence_widget = QSlider()
+        self.desired_confidence_widget.setRange(900, 980)  
+        self.desired_confidence_widget.setValue(980)  
+        self.desired_confidence_widget.setOrientation(1) 
+
+        def update_confidence_label(value):
+            scaled_value = value / 10
+            desired_confidence_label.setText(f"Desired Confidence Level ({scaled_value}%):")
+
+        self.desired_confidence_widget.valueChanged.connect(update_confidence_label)
+        update_confidence_label(self.desired_confidence_widget.value())
+
+        review_period_label = QLabel("Review period:")
+        self.review_period_widget = QSpinBox()
+        self.review_period_widget.setRange(1, 365)
+        self.review_period_widget.setValue(20)
+
+        num_days_label = QLabel("Forecast horison (days):")
+        self.num_days_widget = QSpinBox()
+        self.num_days_widget.setRange(1, 1000)
+        self.num_days_widget.setValue(100)
+        
+        days_to_order_label = QLabel("How many days until the next order arrival?")
+        self.days_to_order_widget = QSpinBox()
+        self.days_to_order_widget.setRange(1, 100)
+        self.days_to_order_widget.setValue(15)
+        
+        next_review_label = QLabel("How many days until the next review?")
+        self.next_review_widget = QSpinBox()
+        self.next_review_widget.setRange(1, 100)
+        self.next_review_widget.setValue(11)
+        
+        self.mode_service_level_label = QLabel("Service Level: ")
+        self.confidence_level_label = QLabel("Confidence Level: ")
+        
+        self.table_widget1 = QTableWidget()
+        self.table_widget2 = QTableWidget()
+        
+        self.table_widget1.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.table_widget2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        self.run_button = QPushButton("Run Simulation")
+        self.run_button.clicked.connect(self.show_simulation_results)
+        
+        # Add the widgets to the layout
+        layout1.addWidget(upload_button)
+        layout1.addLayout(supplier_widget)
+        layout1.addLayout(constraint_widget)
+        layout1.addWidget(self.mov_widget)
+        layout1.addLayout(approach_widget)
+        layout1.addWidget(lead_time_label)
+        layout1.addWidget(self.lead_time_widget)
+        layout1.addWidget(desired_service_level_label)
+        layout1.addWidget(self.desired_service_level_widget)
+        layout1.addWidget(desired_confidence_label)
+        layout1.addWidget(self.desired_confidence_widget)
+        layout1.addWidget(review_period_label)
+        layout1.addWidget(self.review_period_widget)
+        layout1.addWidget(num_days_label)
+        layout1.addWidget(self.num_days_widget)
+        layout1.addWidget(days_to_order_label)
+        layout1.addWidget(self.days_to_order_widget)
+        layout1.addWidget(next_review_label)
+        layout1.addWidget(self.next_review_widget)
+        layout2.addWidget(self.table_widget1)
+        layout1.addWidget(self.run_button)
+        layout1.addWidget(self.mode_service_level_label)
+        layout1.addWidget(self.confidence_level_label)
+        layout2.addWidget(self.table_widget2)
+        
+    def upload_excel_file(self):
+        options = QFileDialog.Options()
+        options |= QFileDialog.ReadOnly
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Upload Excel File", "", "Excel Files (*.xlsx *.xls);;All Files (*)", options=options
+        )
+
+        self.df_suppliers = pd.read_excel(file_name, sheet_name='Suppliers')
+        self.data = pd.read_excel(file_name, sheet_name='General info')
+        self.data_demand = pd.read_excel(file_name, sheet_name='Demand Data')
+        
+    def get_selected_supplier(self):
+        checked_button = self.supplier_group.checkedButton()
+        if checked_button:
+            return checked_button
+        else:
+            return None
+
+    def update_table(self):
+        supplier_text = self.get_selected_supplier()
+        if not supplier_text:
+            return None
+        data = simulate_initial_info(supplier_text, self.df_suppliers, self.data)
+
+        self.table_widget1.clear()
+        self.table_widget1.setRowCount(len(data))
+        self.table_widget1.setColumnCount(10)
+        self.table_widget1.setHorizontalHeaderLabels(["Item", "Safety Stock Days", "Inventory Onhand", "Inventory Level", "Orders in transit", "MOQ","Lot Size", "Unit Cost", "Volume", "Weight"])
+
+        for row_idx, (item, values) in enumerate(data.items()):
+            self.table_widget1.setItem(row_idx, 0, QTableWidgetItem(str(item)))
+            self.table_widget1.setItem(row_idx, 1, QTableWidgetItem(str(values['Safety Stock Days'])))
+            self.table_widget1.setItem(row_idx, 2, QTableWidgetItem(str(values['Inventory Onhand'])))
+            self.table_widget1.setItem(row_idx, 3, QTableWidgetItem(str(values['Inventory Level'])))
+            self.table_widget1.setItem(row_idx, 4, QTableWidgetItem(str(values['Orders in transit'])))
+            self.table_widget1.setItem(row_idx, 5, QTableWidgetItem(str(values['MOQ'])))
+            self.table_widget1.setItem(row_idx, 6, QTableWidgetItem(str(values['Lot Size'])))
+            self.table_widget1.setItem(row_idx, 7, QTableWidgetItem(str(values['Unit Cost'])))
+            self.table_widget1.setItem(row_idx, 8, QTableWidgetItem(str(values['Volume'])))
+            self.table_widget1.setItem(row_idx, 9, QTableWidgetItem(str(values['Weight'])))
+            
+        self.table_widget1.resizeColumnsToContents()
+
+    def show_simulation_results(self):
+        mean, half_width, safety_stock_days = simulate_inventory_planning(
+            self.supplier_group, self.constraint_group, self.mov_widget, self.approach_group, self.lead_time_widget,
+            self.desired_service_level_widget, self.desired_confidence_widget, self.review_period_widget, self.num_days_widget, self.days_to_order_widget, self.next_review_widget, self.df_suppliers, self.data, self.data_demand)
+
+        self.mean_label.setText(f"Service Level: {mean}")
+        self.half_width_label.setText(f"Half-width: {half_width}")
+
+        # Create the table header
+        header_labels = ["Item", "Safety Stock Days"]
+        self.table_widget2.setColumnCount(len(header_labels))
+        self.table_widget2.setHorizontalHeaderLabels(header_labels)
+
+        # Populate the table with safety stock days for each item
+        self.table_widget2.setRowCount(len(safety_stock_days))
+        for row, (item, days) in enumerate(safety_stock_days.items()):
+            item_widget = QTableWidgetItem(f"Item {item}")
+            days_widget = QTableWidgetItem(str(days))
+            self.table_widget2.setItem(row, 0, item_widget)
+            self.table_widget2.setItem(row, 1, days_widget)
+            
+        self.table_widget2.resizeColumnsToContents()
+            
+if __name__ == "__main__":
+    app = QApplication([])
+    window = MainWindow()
+    window.show()
+    app.exec_()
