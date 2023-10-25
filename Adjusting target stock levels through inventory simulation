@@ -79,6 +79,7 @@ def simulate_inventory_planning(supplier, constraint, mov, approach, lead_time, 
           forecast_demand[item] = [qty]
   while mean > desired_service_level:
     service_levels = []
+    sensitivity = []
     sim_iteration += 1
     print(f"Simulation: {sim_iteration}")
     
@@ -86,7 +87,7 @@ def simulate_inventory_planning(supplier, constraint, mov, approach, lead_time, 
       print(f'num_sim: {simulation_num}')
 
       inventory_onhand = dict(zip(df['Item'], df['Inventory Onhand']))
-      inventory_level = inventory_onhand 
+      inventory_level = dict(zip(df['Item'], df['Inventory Onhand']))
       for item in item_numbers:  
         for index, row in future_orders_data.iterrows():
             item_name = row['Item'] 
@@ -141,8 +142,7 @@ def simulate_inventory_planning(supplier, constraint, mov, approach, lead_time, 
 
           real_demand[item] = simulated_values
   # Order generation..........................................................................................................................................................................................          
-      unsorted_orders = []
-      item_pending = deque() 
+      unsorted_orders = [] 
       day_of_review = next_review
       if day_of_review == review_period:
         day_of_review = 0
@@ -152,6 +152,7 @@ def simulate_inventory_planning(supplier, constraint, mov, approach, lead_time, 
         order_days = review_period
         
       for item in item_numbers:
+        item_pending = deque()
         current_date = datetime(2023, 10, 1) 
         for day in range(1, num_days + 1):
             if inventory_onhand[item] >= real_demand[item][day - 1]:
@@ -203,14 +204,13 @@ def simulate_inventory_planning(supplier, constraint, mov, approach, lead_time, 
         orders = sorted(unsorted_orders, key=lambda x: (x[0], x[3]))     
   # Define simulation parameters...................................................................................................................................................................................................................................................
       inventory_onhand = dict(zip(df['Item'], df['Inventory Onhand']))
-      inventory_level = inventory_onhand 
+      inventory_level = dict(zip(df['Item'], df['Inventory Onhand']))
       for item in item_numbers:  
         for index, row in future_orders_data.iterrows(): 
             item_name = row['Item'] 
             delivery_quantity = row['QCONF'] 
             if item == item_name: 
                 inventory_level[item] += delivery_quantity 
-      sensitivity = []
       inventory_pending = deque()
       total_orders = 0
       sufficient_orders = 0
@@ -271,8 +271,8 @@ def simulate_inventory_planning(supplier, constraint, mov, approach, lead_time, 
                         i += 1
 
               else:
-                for _, item, value, _ in orders.copy():
-                  if order_value < mov:
+                for DAY, item, value, _ in orders.copy():
+                  if order_value < mov or day == DAY:
                     inventory_level[item] += value
                     inventory_pending.append((day + lead_time, item, value))
                     order_value += unit_cost[item]*value
